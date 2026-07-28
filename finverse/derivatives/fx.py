@@ -10,14 +10,6 @@ from finverse.derivatives import fx
 
 fwd = fx.forward(spot=1.085, r_domestic=0.053, r_foreign=0.038, tenor=1.0, pair='EURUSD')
 fwd.summary()
-
-ccs = fx.cross_currency_swap(notional_usd=10_000_000, pair='EURUSD', spot=1.085,
-                              tenor=3, basis_spread=-0.0010)
-ccs.summary()
-
-opt = fx.option(spot=1.085, strike=1.10, tenor=0.5, r_domestic=0.053,
-                r_foreign=0.038, sigma=0.085, type='call', pair='EURUSD')
-opt.summary()
 """
 from __future__ import annotations
 
@@ -30,8 +22,6 @@ from scipy.stats import norm  # type: ignore
 OptionType = Literal["call", "put"]
 
 
-# ── Garman-Kohlhagen (GK) helpers ────────────────────────────────────────────
-
 def _gk_d1(S, K, T, r_d, r_f, sigma):
     return (math.log(S / K) + (r_d - r_f + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
 
@@ -39,8 +29,6 @@ def _gk_d1(S, K, T, r_d, r_f, sigma):
 def _gk_d2(S, K, T, r_d, r_f, sigma):
     return _gk_d1(S, K, T, r_d, r_f, sigma) - sigma * math.sqrt(T)
 
-
-# ── FX Forward ───────────────────────────────────────────────────────────────
 
 @dataclass
 class FXForwardResult:
@@ -51,7 +39,7 @@ class FXForwardResult:
     tenor: float
 
     forward_rate: float = 0.0
-    forward_points: float = 0.0   # in pips = (fwd - spot) * 10000
+    forward_points: float = 0.0
     cip_implied_rate: float = 0.0
 
     def summary(self) -> None:
@@ -80,14 +68,8 @@ def forward(
     tenor: float,
     pair: str = "",
 ) -> FXForwardResult:
-    """
-    FX forward rate via Covered Interest Parity (CIP).
-
-    F = S * (1 + r_d)^T / (1 + r_f)^T
-    """
     fwd = spot * ((1 + r_domestic) ** tenor) / ((1 + r_foreign) ** tenor)
     fwd_points = (fwd - spot) * 10000
-    # Implied foreign rate from observed forward
     cip_implied = (spot / fwd) ** (1 / tenor) * (1 + r_domestic) - 1
 
     return FXForwardResult(
@@ -102,8 +84,6 @@ def forward(
     )
 
 
-# ── Cross-Currency Swap ───────────────────────────────────────────────────────
-
 @dataclass
 class CrossCurrencySwapResult:
     pair: str
@@ -115,7 +95,7 @@ class CrossCurrencySwapResult:
     npv: float = 0.0
     notional_foreign: float = 0.0
     basis_spread_bps: float = 0.0
-    fx_delta: float = 0.0  # approximate
+    fx_delta: float = 0.0
 
     def summary(self) -> None:
         try:
@@ -144,24 +124,15 @@ def cross_currency_swap(
     r_usd: float = 0.053,
     r_foreign: float = 0.038,
 ) -> CrossCurrencySwapResult:
-    """
-    Price a cross-currency basis swap.
-
-    Simplified: NPV = effect of basis spread on foreign leg payments.
-    basis_spread : float — e.g. -0.0010 means -10 bps (pay basis)
-    """
     notional_foreign = notional_usd / spot
     basis_spread_bps = basis_spread * 10000
 
-    # Present value impact of the basis spread over the tenor
-    # Approximate: NPV = notional * basis_spread * sum(P(0, t_i) * dt)
-    dt = 0.5  # semi-annual
+    dt = 0.5
     n_periods = int(tenor / dt)
     annuity = sum(math.exp(-r_usd * i * dt) * dt for i in range(1, n_periods + 1))
     npv = notional_usd * basis_spread * annuity
 
-    # FX delta: change in NPV for 1% move in spot
-    fx_delta = notional_foreign * 0.01 * spot  # first-order approximation
+    fx_delta = notional_foreign * 0.01 * spot
 
     return CrossCurrencySwapResult(
         pair=pair,
@@ -175,8 +146,6 @@ def cross_currency_swap(
         fx_delta=fx_delta,
     )
 
-
-# ── FX Option (Garman-Kohlhagen) ─────────────────────────────────────────────
 
 @dataclass
 class FXOptionResult:
@@ -206,11 +175,11 @@ class FXOptionResult:
             t.add_row("Spot", f"{self.spot:.5f}")
             t.add_row("Strike", f"{self.strike:.5f}")
             t.add_row("Tenor", f"{self.tenor:.2f}y")
-            t.add_row("σ (vol)", f"{self.sigma:.2%}")
+            t.add_row("vol (sigma)", f"{self.sigma:.2%}")
             t.add_row("Price (domestic)", f"{self.price:.6f}")
             t.add_row("Delta", f"{self.delta:+.4f}")
             t.add_row("Gamma", f"{self.gamma:.6f}")
-            t.add_row("Vega (per 1% σ)", f"{self.vega:.6f}")
+            t.add_row("Vega (per 1% sigma)", f"{self.vega:.6f}")
             t.add_row("Breakeven", f"{self.breakeven:.5f}")
             console.print(t)
         except ImportError:
@@ -227,10 +196,6 @@ def option(
     type: OptionType = "call",
     pair: str = "",
 ) -> FXOptionResult:
-    """
-    Price a European FX option using the Garman-Kohlhagen model.
-    (Black-Scholes treating r_foreign as continuous dividend yield.)
-    """
     if tenor <= 0 or sigma <= 0:
         raise ValueError("tenor and sigma must be positive")
 
@@ -271,31 +236,12 @@ def option(
     )
 
 
-# ── Currency-Adjusted WACC ───────────────────────────────────────────────────
-
 def currency_adjusted_wacc(
     base_wacc: float,
-    revenue_fx_exposure: dict[str, float],
+    revenue_fx_exposure: dict,
     tenor: float = 5.0,
     hedging_cost_spread: float = 0.003,
 ) -> float:
-    """
-    Compute a currency-adjusted WACC for multinational DCF models.
-
-    For each foreign currency bucket, the hedging cost (forward basis) is
-    added proportionally to the base WACC.
-
-    Parameters
-    ----------
-    base_wacc : float — USD or domestic WACC (e.g. 0.095)
-    revenue_fx_exposure : dict — {currency: share}, e.g. {'EUR': 0.35, 'GBP': 0.20}
-    tenor : float — average hedging horizon in years
-    hedging_cost_spread : float — assumed hedging cost spread per year (default 30bps)
-
-    Returns
-    -------
-    float — adjusted WACC
-    """
     total_foreign = sum(revenue_fx_exposure.values())
     if total_foreign > 1.0:
         revenue_fx_exposure = {k: v / total_foreign for k, v in revenue_fx_exposure.items()}
