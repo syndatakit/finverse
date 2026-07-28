@@ -33,3 +33,29 @@ jobs:
 
       - name: Check imports
         run: python -c "import finverse; print(f'finverse v{finverse.__version__} OK')"
+
+      - name: Enforce no deprecation warnings in canonical import path
+        run: |
+          python -W error::DeprecationWarning -c "
+          from finverse.models.dcf import DCF
+          from finverse.models.lbo import LBO
+          from finverse.models.comps import analyze
+          from finverse.options.black_scholes import price
+          from finverse.derivatives import rates, fx, discount, blacks_model
+          from finverse.ml import earnings_surprise, price_target_ensemble
+          from finverse.risk import stress_testing, monte_carlo
+          print('Canonical imports: no DeprecationWarning raised. OK.')
+          "
+
+      - name: Verify legacy API still works (deprecation shim)
+        run: |
+          python -W default::DeprecationWarning -c "
+          import finverse
+          # Just touch the legacy names (import is silent, only call fires)
+          _ = finverse.DCF
+          _ = finverse.LBO
+          _ = finverse.comps
+          _ = finverse.ddm_gordon
+          _ = finverse.bond_price
+          print('Legacy API is accessible via deprecation shim. OK.')
+          "
