@@ -14,14 +14,6 @@ curve = nelson_siegel.us_curve()
 swap = rates.swap(notional=10_000_000, fixed_rate=0.045, tenor=5,
                   payment_freq='semi-annual', curve=curve)
 swap.summary()
-
-fra = rates.fra(notional=5_000_000, contract_rate=0.052, start=0.5, end=1.0, curve=curve)
-fra.summary()
-
-swaption = rates.swaption(notional=10_000_000, strike_rate=0.048,
-                          option_expiry=1.0, swap_tenor=5,
-                          vol=0.20, curve=curve, type='payer')
-swaption.summary()
 """
 from __future__ import annotations
 
@@ -31,20 +23,18 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from finverse.derivatives._discount import (
+from finverse.derivatives.discount import (
     discount_factor,
     forward_rate,
     par_swap_rate,
     annuity_pv,
 )
-from finverse.derivatives._blacks_model import blacks_swaption
+from finverse.derivatives.blacks_model import blacks_swaption
 
 
 PaymentFreq = Literal["annual", "semi-annual", "quarterly", "monthly"]
 SwaptionType = Literal["payer", "receiver"]
 
-
-# ── Swap ─────────────────────────────────────────────────────────────────────
 
 @dataclass
 class SwapResult:
@@ -59,7 +49,7 @@ class SwapResult:
     fixed_leg_pv: float = 0.0
     float_leg_pv: float = 0.0
     cash_flows: pd.DataFrame = field(default_factory=pd.DataFrame)
-    breakeven_shift: float = 0.0   # bps
+    breakeven_shift: float = 0.0
 
     def summary(self) -> None:
         try:
@@ -88,27 +78,13 @@ def swap(
     payment_freq: PaymentFreq = "semi-annual",
     curve: Any | None = None,
 ) -> SwapResult:
-    """
-    Price a plain vanilla fixed/float interest rate swap.
-
-    Parameters
-    ----------
-    notional : float
-    fixed_rate : float — rate paid by fixed-rate payer
-    tenor : float — swap tenor in years
-    payment_freq : payment frequency
-    curve : Nelson-Siegel curve (optional; uses flat 5% if not provided)
-    """
     freq_map = {"annual": 1, "semi-annual": 2, "quarterly": 4, "monthly": 12}
     n_per_year = freq_map.get(payment_freq, 2)
     dt = 1 / n_per_year
     n_periods = int(tenor * n_per_year)
-    # Use par swap rate as the market float rate (not fixed_rate)
-    # This ensures NPV is negative when fixed_rate > par_rate
-    from finverse.derivatives._discount import par_swap_rate as _psr
+    from finverse.derivatives.discount import par_swap_rate as _psr
     flat_rate = _psr(tenor, payment_freq) if curve is None else fixed_rate
 
-    # Build cash flows
     rows = []
     fixed_pv = 0.0
     float_pv = 0.0
@@ -135,13 +111,9 @@ def swap(
             "float_pv": round(float_cf * P_t, 2),
         })
 
-    # Add final notional exchange (net = 0 in vanilla swap)
-    npv = float_pv - fixed_pv   # NPV from fixed-payer perspective
-
-    # Par rate
+    npv = float_pv - fixed_pv
     psr = par_swap_rate(tenor, payment_freq, curve, flat_rate)
 
-    # DV01: parallel shift by +1bp
     fixed_pv_up = sum(
         notional * fixed_rate * dt * discount_factor(i * dt, None, flat_rate + 0.0001)
         for i in range(1, n_periods + 1)
@@ -154,7 +126,6 @@ def swap(
     npv_up = float_pv_up - fixed_pv_up
     dv01 = abs(npv_up - npv)
 
-    # Breakeven shift in bps
     breakeven_shift = (psr - fixed_rate) * 10000 if dv01 > 0 else 0.0
 
     return SwapResult(
@@ -172,8 +143,6 @@ def swap(
     )
 
 
-# ── FRA ──────────────────────────────────────────────────────────────────────
-
 @dataclass
 class FRAResult:
     notional: float
@@ -183,7 +152,7 @@ class FRAResult:
 
     npv: float = 0.0
     implied_forward_rate: float = 0.0
-    settlement_amount: float = 0.0   # at start date
+    settlement_amount: float = 0.0
 
     def summary(self) -> None:
         try:
@@ -195,7 +164,7 @@ class FRAResult:
             t.add_column("Value", justify="right")
             t.add_row("Contract Rate", f"{self.contract_rate:.3%}")
             t.add_row("Implied Forward Rate", f"{self.implied_forward_rate:.3%}")
-            t.add_row("FRA Period", f"{self.start:.2f}y → {self.end:.2f}y")
+            t.add_row("FRA Period", f"{self.start:.2f}y to {self.end:.2f}y")
             t.add_row("NPV", f"${self.npv:,.2f}")
             t.add_row("Settlement Amount (at start)", f"${self.settlement_amount:,.2f}")
             console.print(t)
@@ -210,27 +179,13 @@ def fra(
     end: float,
     curve: Any | None = None,
 ) -> FRAResult:
-    """
-    Price a Forward Rate Agreement (FRA).
-
-    Parameters
-    ----------
-    notional : float
-    contract_rate : float — agreed rate in the FRA
-    start : float — start of FRA period (years)
-    end : float — end of FRA period (years)
-    curve : Nelson-Siegel curve (optional)
-    """
     dt = end - start
     flat_rate = contract_rate
     fwd = forward_rate(start, end, curve, flat_rate)
     P_end = discount_factor(end, curve, flat_rate)
     P_start = discount_factor(start, curve, flat_rate)
 
-    # NPV = notional * (fwd - contract_rate) * dt * P(0, end)
     npv = notional * (fwd - contract_rate) * dt * P_end
-
-    # Settlement at start date (discounted back by 1 period)
     settlement = notional * (fwd - contract_rate) * dt / (1 + fwd * dt)
 
     return FRAResult(
@@ -243,8 +198,6 @@ def fra(
         settlement_amount=settlement,
     )
 
-
-# ── Swaption ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class SwaptionResult:
@@ -289,19 +242,6 @@ def swaption(
     curve: Any | None = None,
     type: SwaptionType = "payer",
 ) -> SwaptionResult:
-    """
-    Price a European swaption using Black's model.
-
-    Parameters
-    ----------
-    notional : float
-    strike_rate : float — the fixed rate if exercised
-    option_expiry : float — option expiry in years
-    swap_tenor : float — underlying swap tenor in years
-    vol : float — Black's vol
-    curve : Nelson-Siegel curve (optional)
-    type : 'payer' or 'receiver'
-    """
     flat_rate = strike_rate
     psr = par_swap_rate(swap_tenor, "semi-annual", curve, flat_rate)
     ann = annuity_pv(swap_tenor, "semi-annual", curve, flat_rate)
